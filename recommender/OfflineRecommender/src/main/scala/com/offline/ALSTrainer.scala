@@ -76,8 +76,7 @@ object ALSTrainer {
         val rmse = getRMSE(model, testData)
         (rank, lambda, rmse)
       }
-    // 按照 rmse 排序
-    // 控制台打印输出最优参数
+    // 按照 rmse 排序，控制台打印输出最优参数
     println("===>", result.sortBy(_._3).head)
     // println(result.minBy(_._3))
   }

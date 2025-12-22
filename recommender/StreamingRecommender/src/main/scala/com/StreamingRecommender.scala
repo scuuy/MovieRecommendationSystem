@@ -48,6 +48,8 @@ object StreamingRecommender {
 
   val FILTER_SCORE = 0.7
   val SCORE_FACTOR = 3
+  val REDIS_USER_RATING_PREFIX = "uid:"
+  val REDIS_STREAM_RECS_PREFIX = "stream:uid:"
 
   val KAFKA_BATCH_TIME = 2
   // kafka 集群的配置信息
@@ -121,7 +123,8 @@ object StreamingRecommender {
           case (uid, mid, score, timestamp) => {
             println("*************** rating data coming! ***************")
 
-            // 1. 从 redis 里获取当前用户最近的 K 次评分，保存成 Array[(mid, score)]
+            // 1. 写入用户最新评分，并从 redis 里获取当前用户最近的 K 次评分
+            updateUserRecentlyRating(uid, mid, score, ConnHelper.jedis)
             val userRecentlyRatings = getUserRecentlyRating(MAX_USER_RATINGS_NUM, uid, ConnHelper.jedis)
 
             // 2. 从相似度矩阵中取出当前电影最相似的 MAX_SIM_MOVIES_NUM 个电影，作为备选列表，Array[mid]
@@ -132,8 +135,9 @@ object StreamingRecommender {
 
             streamRecs.foreach(println(_))
 
-            // 4. 把推荐数据保存到 mongodb
+            // 4. 把推荐数据保存到 mongodb 和 redis
             saveDataToMongoDB(uid, streamRecs)
+            saveDataToRedis(uid, streamRecs, ConnHelper.jedis)
             println("*************** rating data ending! ***************")
           }
         }
@@ -151,13 +155,19 @@ object StreamingRecommender {
 
   def getUserRecentlyRating(num: Int, uid: Int, jedis: Jedis): Array[(Int, Double)] = {
     // 从 redis 读取数据，用户评分数据保存在 uid:UID 为 key 的队列里，value 是 MID:SCORE
-    jedis.lrange("uid:" + uid, 0, num - 1)
+    jedis.lrange(REDIS_USER_RATING_PREFIX + uid, 0, num - 1)
       .map {
         item => // 具体每个评分又是以冒号分隔的两个值
           val attr = item.split("\\:")
           (attr(0).trim.toInt, attr(1).trim.toDouble)
       }
       .toArray
+  }
+
+  def updateUserRecentlyRating(uid: Int, mid: Int, score: Double, jedis: Jedis): Unit = {
+    val key = REDIS_USER_RATING_PREFIX + uid
+    jedis.lpush(key, s"$mid:$score")
+    jedis.ltrim(key, 0, MAX_USER_RATINGS_NUM - 1)
   }
 
   /**
@@ -271,5 +281,14 @@ object StreamingRecommender {
     // 将 streamRecs 数据存入表中
     streamRecsCollection.insert(MongoDBObject("uid" -> uid,
       "recs" -> streamRecs.map(x => MongoDBObject("mid" -> x._1, "score" -> x._2))))
+  }
+
+  def saveDataToRedis(uid: Int, streamRecs: Array[(Int, Double)], jedis: Jedis): Unit = {
+    val key = REDIS_STREAM_RECS_PREFIX + uid
+    jedis.del(key)
+    if (streamRecs.nonEmpty) {
+      val values = streamRecs.map { case (mid, score) => s"$mid:$score" }
+      jedis.rpush(key, values: _*)
+    }
   }
 }
